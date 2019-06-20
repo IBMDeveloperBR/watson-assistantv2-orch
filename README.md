@@ -1,2 +1,7 @@
-# watson-assistant-pyflask-orchestrator
-A complete orchestrator for watson assistant, based on the AssistantV2 official Watson API. The assistant `session_ids` are managed by an IBM Cloud Redis database.
+# pyflask watson assistant orchestrator with redis
+
+> create a REDIS Instance (dallas)
+> create a Watson Assistant Instance (dallas)
+> copy Watson Assistant credentials to wa-credentials.json
+> create and copy redis credentials to db-credentials.json
+> copy the certificate pem file

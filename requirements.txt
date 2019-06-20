@@ -1,0 +1,6 @@
+flask
+werkzeug
+pyjwt
+gunicorn
+ibm-watson==3.0.4
+redis
