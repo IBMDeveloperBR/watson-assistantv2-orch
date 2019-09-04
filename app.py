@@ -1,49 +1,67 @@
-#!/usr/bin/env python
+"""
+    Python Watson Assistant orchestrator based on Flask and Gunicorn. Makes 
+    use of Redis to store context. The redis driver can be installed using 
+    the command: `pip install redis`. The openssl package is also a requirement.
+    Updated the last time at: 18:57 04/SEP/2019 by @vnderlev
+"""
 
-from config import Config
-from flask import Flask, render_template, request, jsonify
-import atexit, os, sys, ssl, os.path, json
-
-from ibm_watson import AssistantV2
+import gunicorn_config
+from os import urandom
+from urllib.parse import urlparse
 from datetime import datetime as dt
 from datetime import timedelta
-from urllib.parse import urlparse
-import redis
 
-### Setup the Flask WebApp
+from flask import Flask, render_template, request, jsonify
+from flask_sslify import SSLify
+
+from ibm_watson import AssistantV2
+import redis, base64, json
+
+### Setup Flask and Gunicorn
 app = Flask(__name__)
-app.config.from_object(Config)
+app.config['SECRET_KEY'] = urandom(16)
+sslify = SSLify(app)
 
 ### Read the Watson Assistant credentials from the `wa-credentials.json` file.
 with open('wa-credentials.json') as json_file:
     wa_cred = json.load(json_file)
-### Authenticate with the AssistantV2 API - SDK will manage the IAM Token.
+### Authenticate with the AssistantV2 API. The Watson SDK will manage the IAM Token.
 wa = AssistantV2(version='2019-02-28',
                  iam_apikey=wa_cred['apikey'],
                  url=wa_cred['url'])
 
-### Read the Redis credentials from the `db-credentials.json` file.
-with open('db-credentials.json') as json_file:
-    db_cred = json.load(json_file)['connection']['rediss']
-    connection_string = db_cred['composed'][0]
-    parsed = urlparse(connection_string)
-    #crt = db_cred['certificate']['certificate_base64']
-    #key = db_cred['certificate']['name']
-    #print("\nhostname={}".format(parsed.hostname))
-    #print("\nport={}".format(parsed.port))
-    #print("\npassword={}".format(parsed.password))
-### Authenticate and connect to the Redis database.
-r = redis.StrictRedis(host=parsed.hostname,
-                      port=parsed.port,
-                      password=parsed.password,
-                      ssl=True,
-                      ssl_ca_certs='rediscert.pem',
-                      decode_responses=True)
+# Copy the Redis credentials from the IBM Cloud Web page and save them as a json file, as named below. 
+REDIS_JSONFILE = "iredis_credentials.json"
+with open(REDIS_JSONFILE) as json_file:
+    iredis_cred = json.load(json_file)['connection']['rediss']
+connection_string = iredis_cred['composed'][0]
+parsed = urlparse(connection_string)
 
-# On IBM Cloud Cloud Foundry, get the port number from the environment variable
-# PORT. When running this app on the local machine, default the port to 8000
-PORT = int(os.getenv('VCAP_APP_PORT', 8000))
-#port = int(os.getenv('PORT', 8000))
+# Build the Redis root certificate file:
+with open("rediscert.pem", "w") as rootcert:
+    coded_cert = iredis_cred['certificate']['certificate_base64']
+    rootcert.write(base64.b64decode(coded_cert).decode('utf-8'))
+
+iredis = None
+print("\nConnecting to IBM Cloud Redis...")
+try:
+    ### Authenticate and connect to the Redis database.
+    # The decode_repsonses flag here directs the client to convert the responses from Redis into Python strings
+    # using the default encoding utf-8.
+    iredis = redis.StrictRedis(
+        host=parsed.hostname,
+        port=parsed.port,
+        password=parsed.password,
+        ssl=True,
+        ssl_ca_certs='rediscert.pem',
+        decode_responses=True
+    )
+    print("\nConnected successfully to IBM Cloud Redis.")
+except Exception as error:
+    print("\nException: {}".format(error))
+finally:
+    pass
+
 
 '''
 *   Watson Assistant V2 API PyFlask Orchestrator Routes
@@ -54,13 +72,13 @@ PORT = int(os.getenv('VCAP_APP_PORT', 8000))
 def chatfuel():
 
     ### Check session_id of fb_user_id:
-    session_id_dt = r.get(str(request.args['fb_user_id']))
+    session_id_dt = iredis.get(str(request.args['fb_user_id']))
     if session_id_dt == None:
         # Generate a new session_id if none is present
         session_id = wa.create_session(assistant_id=wa_cred['assistant_id']
                                        ).get_result()['session_id']
         # Save the session_id at Redis
-        r.set(str(request.args['fb_user_id']),
+        iredis.set(str(request.args['fb_user_id']),
               "{}${}".format(session_id, dt.now().strftime("%c")))
     else:
         # Check if the present session_id is expired
@@ -72,7 +90,7 @@ def chatfuel():
             session_id = wa.create_session(assistant_id=wa_cred['assistant_id']
                                            ).get_result()['session_id']
             # Save the session_id at Redis
-            r.set(str(request.args['fb_user_id']),
+            iredis.set(str(request.args['fb_user_id']),
                   "{}${}".format(session_id, dt.now().strftime("%c")))
         else:
             # Session at Redis is still active
@@ -137,4 +155,4 @@ def chatfuel():
 '''
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    app.run(host="0.0.0.0", port=gunicorn_config.PORT, debug=False)
