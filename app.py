@@ -1,53 +1,63 @@
-"""
-    Python Watson Assistant orchestrator based on Flask and Gunicorn. Makes 
-    use of Redis to store context. The redis driver can be installed using 
-    the command: `pip install redis`. The openssl package is also a requirement.
-    Updated the last time at: 18:57 04/SEP/2019 by @vnderlev
-"""
-
 import gunicorn_config
 from os import urandom
 from urllib.parse import urlparse
 from datetime import datetime as dt
 from datetime import timedelta
-
+from threading import Thread
+from time import sleep
 from flask import Flask, render_template, request, jsonify
 from flask_sslify import SSLify
-
 from ibm_watson import AssistantV2
 import redis, base64, json
 
-### Setup Flask and Gunicorn
+
+'''
+    Initial Application Setup
+    - A random SECRET_KEY is generated;
+    - SSLify is used to handle SSL certification.
+'''
+# Start Flask Application:
 app = Flask(__name__)
+# Configure a random SECRET_KEY:
 app.config['SECRET_KEY'] = urandom(16)
+# Setup SSLify for HTTPS communication:
 sslify = SSLify(app)
 
-### Read the Watson Assistant credentials from the `wa-credentials.json` file.
-with open('wa-credentials.json') as json_file:
+
+'''
+    IBM Cloud Services Authentication
+    - A Redis instance is used to handle WA sessions;
+    - Watson Assistant uses the V2 API.
+'''
+# Read Watson Assistant credentials from the `wa-credentials.json` file:
+WA_JSONFILE = "wa-credentials.json"
+with open(WA_JSONFILE) as json_file:
     wa_cred = json.load(json_file)
-### Authenticate with the AssistantV2 API. The Watson SDK will manage the IAM Token.
+# Authenticate with the AssistantV2 API,
+# The Watson SDK will manage the IAM Token:
 wa = AssistantV2(version='2019-02-28',
                  iam_apikey=wa_cred['apikey'],
                  url=wa_cred['url'])
-
-# Copy the Redis credentials from the IBM Cloud Web page and save them as a json file, as named below. 
+# Read Redis credentials from the `iredis-credentials.json` file:
 REDIS_JSONFILE = "iredis_credentials.json"
 with open(REDIS_JSONFILE) as json_file:
     iredis_cred = json.load(json_file)['connection']['rediss']
 connection_string = iredis_cred['composed'][0]
 parsed = urlparse(connection_string)
-
-# Build the Redis root certificate file:
+# Build the Redis root certificate .pem file:
 with open("rediscert.pem", "w") as rootcert:
     coded_cert = iredis_cred['certificate']['certificate_base64']
     rootcert.write(base64.b64decode(coded_cert).decode('utf-8'))
 
+'''
+    Establish connection with Redis
+'''
 iredis = None
 print("\nConnecting to IBM Cloud Redis...")
 try:
-    ### Authenticate and connect to the Redis database.
-    # The decode_repsonses flag here directs the client to convert the responses from Redis into Python strings
-    # using the default encoding utf-8.
+    # The decode_responses flag here directs the client,
+    # to convert the responses from Redis into Python 
+    # strings using the default encoding utf-8.
     iredis = redis.StrictRedis(
         host=parsed.hostname,
         port=parsed.port,
@@ -64,14 +74,17 @@ finally:
 
 
 '''
-*   Watson Assistant V2 API PyFlask Orchestrator Routes
-*
+    Flask Watson Assistant V2 Orchestrator Chatfuel Route
+    - In the first implementation, only this route exists;
+    - The `chatfuel` route is an API to be integrated with the Chatfuel service;
+    - The chatfuel service is a convenient method for fast integration with Facebook.
 '''
-
 @app.route('/chatfuel') #args: fb_user_id & msg
 def chatfuel():
-
-    ### Check session_id of fb_user_id:
+    '''
+        Retrieve, or set a new, Watson Assistant `session_id`.
+    '''
+    # Check Redis for `session_id` based on the `fb_user_id`:
     session_id_dt = iredis.get(str(request.args['fb_user_id']))
     if session_id_dt == None:
         # Generate a new session_id if none is present
@@ -89,19 +102,21 @@ def chatfuel():
             # Generate a new session_id if the present one is expired
             session_id = wa.create_session(assistant_id=wa_cred['assistant_id']
                                            ).get_result()['session_id']
-            # Save the session_id at Redis
+            # Save the new session_id at Redis
             iredis.set(str(request.args['fb_user_id']),
                   "{}${}".format(session_id, dt.now().strftime("%c")))
         else:
             # Session at Redis is still active
             session_id = session_id_dt[0]
 
-    ### Send user input to Watson Assistant
+    '''
+        Send user input to Watson Assistant
+    '''
     usr_input = request.args['msg']
     response = wa.message(assistant_id=wa_cred['assistant_id'],
                           session_id=session_id,
-                          input={'message_type': 'text',
-                                 'text': usr_input}).get_result()
+                          input={'message_type': 'text', 'text': usr_input}
+                         ).get_result()
 
     ### Parse Watson Assistant response
     messages = []
@@ -125,34 +140,51 @@ def chatfuel():
                                 payload=dict(template_type='button',
                                 text=i['options']['title'], buttons=buttons))))
         '''
-    # Build response structure
+
+
+    '''
+        Build and return the response structure
+        - Chatfuel Example Response
+            {
+                "messages": [
+                    {
+                    "text": "Não entendi. Pode repetir?"
+                    }
+                ]
+            }
+        - Standard Watson Assistant JSON Response
+            {
+                "output": {
+                    "generic": [
+                    {
+                        "response_type": "text",
+                        "text": "Não entendi. Pode repetir?"
+                    }
+                    ],
+                    "intents": [],
+                    "entities": []
+                }
+            }
+    '''
     response = dict(messages=messages)
     return json.dumps(response)
 
-''' Chatfuel Example Response
-{
-  "messages": [
-    {
-      "text": "Não entendi. Pode repetir?"
-    }
-  ]
-}
 '''
+    Function for clearing expired sessions from the Redis database.
+    - For now, the function clears all entries every 24 hours, at 4AM.
+    - A better algorithm can be devised.
+'''
+def clean_redis(iredis):
+    while True:
+        count = 0
+        for key in iredis.scan_iter():
+            count = count + 1
+            iredis.delete(key)
+        print("Deleted {} Redis keys.".format(count))
+        sleep(60*60*24)
 
-''' Standard Watson Assistant JSON Response
-{
-  "output": {
-    "generic": [
-      {
-        "response_type": "text",
-        "text": "Não entendi. Pode repetir?"
-      }
-    ],
-    "intents": [],
-    "entities": []
-  }
-}
-'''
 
 if __name__ == '__main__':
+    clean_redis_thread = Thread(target=clean_redis, args=(iredis, ))
+    clean_redis_thread.start()
     app.run(host="0.0.0.0", port=gunicorn_config.PORT, debug=False)
