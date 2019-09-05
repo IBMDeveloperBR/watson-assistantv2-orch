@@ -1,14 +1,17 @@
 import gunicorn_config
+
 from os import urandom
 from urllib.parse import urlparse
+import redis, base64, json
+
 from datetime import datetime as dt
 from datetime import timedelta
-from threading import Thread
+
 from time import sleep
 from flask import Flask, render_template, request, jsonify
 from flask_sslify import SSLify
+
 from ibm_watson import AssistantV2
-import redis, base64, json
 
 
 '''
@@ -21,7 +24,7 @@ app = Flask(__name__)
 # Configure a random SECRET_KEY:
 app.config['SECRET_KEY'] = urandom(16)
 # Setup SSLify for HTTPS communication:
-sslify = SSLify(app)
+# sslify = SSLify(app)
 
 
 '''
@@ -30,7 +33,7 @@ sslify = SSLify(app)
     - Watson Assistant uses the V2 API.
 '''
 # Read Watson Assistant credentials from the `wa-credentials.json` file:
-WA_JSONFILE = "wa-credentials.json"
+WA_JSONFILE = "wa_credentials.json"
 with open(WA_JSONFILE) as json_file:
     wa_cred = json.load(json_file)
 # Authenticate with the AssistantV2 API,
@@ -52,7 +55,6 @@ with open("rediscert.pem", "w") as rootcert:
 '''
     Establish connection with Redis
 '''
-iredis = None
 print("\nConnecting to IBM Cloud Redis...")
 try:
     # The decode_responses flag here directs the client,
@@ -75,7 +77,6 @@ finally:
 
 '''
     Flask Watson Assistant V2 Orchestrator Chatfuel Route
-    - In the first implementation, only this route exists;
     - The `chatfuel` route is an API to be integrated with the Chatfuel service;
     - The chatfuel service is a convenient method for fast integration with Facebook.
 '''
@@ -169,22 +170,36 @@ def chatfuel():
     response = dict(messages=messages)
     return json.dumps(response)
 
+
 '''
-    Function for clearing expired sessions from the Redis database.
-    - For now, the function clears all entries every 24 hours, at 4AM.
-    - A better algorithm can be devised.
+    Route for clearing completely the Redis database
+    - Should be called periodically for maintenance.
 '''
-def clean_redis(iredis):
-    while True:
+@app.route('/clean_redis')
+def clean_redis():
+    try:
+        # The decode_responses flag here directs the client,
+        # to convert the responses from Redis into Python 
+        # strings using the default encoding utf-8.
+        iredis2 = redis.StrictRedis(
+            host=parsed.hostname,
+            port=parsed.port,
+            password=parsed.password,
+            ssl=True,
+            ssl_ca_certs='rediscert.pem',
+            decode_responses=True
+        )
+        print("\nConnected successfully to IBM Cloud Redis.")
+    except Exception as error:
+        return "\nException: {}".format(error)
+    finally:
+        # Start clearing keys
         count = 0
-        for key in iredis.scan_iter():
+        for key in iredis2.scan_iter():
             count = count + 1
-            iredis.delete(key)
-        print("Deleted {} Redis keys.".format(count))
-        sleep(60*60*24)
+            iredis2.delete(key)
+        return "Deleted {} Redis keys.".format(count)
 
 
 if __name__ == '__main__':
-    clean_redis_thread = Thread(target=clean_redis, args=(iredis, ))
-    clean_redis_thread.start()
     app.run(host="0.0.0.0", port=gunicorn_config.PORT, debug=False)
